@@ -1,0 +1,219 @@
+name: bootstrap-backend-and-oidc
+
+on:
+  # Manual deployment only - never auto-deploy to production
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+      confirm:
+        description: 'Type "deploy" to confirm deployment'
+        required: true
+        type: string
+  
+  # Only run validation on PRs - never deploy
+  pull_request:
+    branches:
+      - master
+  
+  # Run validation when code is pushed to master - but don't deploy
+  push:
+    branches:
+      - master
+
+concurrency:
+  group: terraform-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init (validate only)
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+  plan:
+    runs-on: ubuntu-latest
+    needs: lint
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
+      - name: Configure AWS CLI
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Build backend config values
+        id: backend
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -euo pipefail
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+          STATE_BUCKET="tf-state-${ACCOUNT_ID}-${AWS_REGION}"
+
+          echo "state_bucket=$STATE_BUCKET" >> "$GITHUB_OUTPUT"
+
+          # Backend config file
+          cat > backend.hcl <<EOF
+          bucket  = "${STATE_BUCKET}"
+          key     = "bootstrap/terraform.tfstate"
+          region  = "${AWS_REGION}"
+          encrypt = true
+          EOF
+
+          echo "Generated backend.hcl:"
+          cat backend.hcl
+
+      - name: Terraform Init (local backend for planning)
+        run: |
+          # Remove only the backend line temporarily for planning
+          cp version.tf version.tf.backup
+          sed '/backend "s3" {}/d' version.tf > version_no_backend.tf
+          mv version_no_backend.tf version.tf
+          
+          # Initialize with local backend
+          terraform init
+
+      - name: Terraform Plan
+        env:
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+          TF_VAR_state_bucket_name: ${{ steps.backend.outputs.state_bucket }}
+          TF_VAR_github_org: ${{ github.repository_owner }}
+          TF_VAR_github_role_name: github-actions-terraform
+        run: |
+          terraform plan -out=tfplan
+
+      - name: Restore version.tf
+        run: |
+          # Restore original version.tf after planning
+          mv version.tf.backup version.tf
+
+      - name: Upload Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: |
+            tfplan
+            backend.hcl
+          retention-days: 2
+
+  apply:
+    runs-on: ubuntu-latest
+    needs: plan
+    # Only run on manual workflow dispatch with confirmation
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'deploy'
+    environment: production
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
+      - name: Configure AWS CLI
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Build backend config values
+        id: backend
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -euo pipefail
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+          STATE_BUCKET="tf-state-${ACCOUNT_ID}-${AWS_REGION}"
+
+          echo "state_bucket=$STATE_BUCKET" >> "$GITHUB_OUTPUT"
+
+          # Backend config file (NOT secret)
+          cat > backend.hcl <<EOF
+          bucket  = "${STATE_BUCKET}"
+          key     = "bootstrap/terraform.tfstate"
+          region  = "${AWS_REGION}"
+          encrypt = true
+          EOF
+
+          echo "Generated backend.hcl:"
+          cat backend.hcl
+
+      - name: Terraform Init (try remote backend first; fallback to local)
+        id: init
+        run: |
+          set -euo pipefail
+
+          # First try initializing with the S3 backend (works after first run)
+          if terraform init -backend-config=backend.hcl; then
+            echo "init_mode=remote" >> "$GITHUB_OUTPUT"
+          else
+            echo "Remote backend not ready yet; using local init for first apply."
+            terraform init -backend=false
+            echo "init_mode=local" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Terraform Apply (creates S3/OIDC/Role)
+        env:
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+          TF_VAR_state_bucket_name: ${{ steps.backend.outputs.state_bucket }}
+          TF_VAR_github_org: ${{ github.repository_owner }}
+          TF_VAR_github_role_name: github-actions-terraform
+        run: |
+          set -euo pipefail
+          terraform apply -auto-approve
+
+      - name: If first run, migrate local state -> S3
+        if: steps.init.outputs.init_mode == 'local'
+        run: |
+          set -euo pipefail
+          terraform init -reconfigure -backend-config=backend.hcl -migrate-state
+
+      - name: Show outputs
+        run: |
+          terraform output
