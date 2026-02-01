@@ -194,6 +194,10 @@ jobs:
             echo "init_mode=remote" >> "$GITHUB_OUTPUT"
           else
             echo "Remote backend not ready yet; using local init for first apply."
+            # Remove backend configuration for local mode
+            cp version.tf version.tf.backup
+            sed '/backend "s3" {}/d' version.tf > version_no_backend.tf
+            mv version_no_backend.tf version.tf
             terraform init -backend=false
             echo "init_mode=local" >> "$GITHUB_OUTPUT"
           fi
@@ -212,6 +216,8 @@ jobs:
         if: steps.init.outputs.init_mode == 'local'
         run: |
           set -euo pipefail
+          # Restore version.tf with backend configuration
+          mv version.tf.backup version.tf
           terraform init -reconfigure -backend-config=backend.hcl -migrate-state
 
       - name: Show outputs
