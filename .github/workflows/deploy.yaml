@@ -218,7 +218,7 @@ jobs:
           set -euo pipefail
           # Restore version.tf with backend configuration
           mv version.tf.backup version.tf
-          terraform init -reconfigure -backend-config=backend.hcl -migrate-state
+          terraform init -migrate-state -backend-config=backend.hcl
 
       - name: Show outputs
         run: |
