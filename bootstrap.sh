@@ -142,29 +142,29 @@ get_account_info() {
 
 create_s3_bucket() {
     log_info "Creating S3 bucket for Terraform state..."
-    
-    # Create bucket
-    if [ "$AWS_REGION" = "us-east-1" ]; then
-        run_command "aws s3api create-bucket --bucket '$STATE_BUCKET' --region '$AWS_REGION'" \
-                   "Creating S3 bucket: $STATE_BUCKET"
+
+    if aws s3api head-bucket --bucket "$STATE_BUCKET" 2>/dev/null; then
+        log_warning "S3 bucket $STATE_BUCKET already exists, skipping creation"
     else
-        run_command "aws s3api create-bucket --bucket '$STATE_BUCKET' --region '$AWS_REGION' --create-bucket-configuration LocationConstraint='$AWS_REGION'" \
-                   "Creating S3 bucket: $STATE_BUCKET"
+        if [ "$AWS_REGION" = "us-east-1" ]; then
+            run_command "aws s3api create-bucket --bucket '$STATE_BUCKET' --region '$AWS_REGION'" \
+                       "Creating S3 bucket: $STATE_BUCKET"
+        else
+            run_command "aws s3api create-bucket --bucket '$STATE_BUCKET' --region '$AWS_REGION' --create-bucket-configuration LocationConstraint='$AWS_REGION'" \
+                       "Creating S3 bucket: $STATE_BUCKET"
+        fi
     fi
-    
-    # Enable versioning
+
+    # These are idempotent - safe to run every time
     run_command "aws s3api put-bucket-versioning --bucket '$STATE_BUCKET' --versioning-configuration Status=Enabled" \
                "Enabling versioning on S3 bucket"
-    
-    # Enable encryption
+
     run_command "aws s3api put-bucket-encryption --bucket '$STATE_BUCKET' --server-side-encryption-configuration '{\"Rules\":[{\"ApplyServerSideEncryptionByDefault\":{\"SSEAlgorithm\":\"AES256\"}}]}'" \
                "Enabling encryption on S3 bucket"
-    
-    # Block public access
+
     run_command "aws s3api put-public-access-block --bucket '$STATE_BUCKET' --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true" \
                "Blocking public access to S3 bucket"
-    
-    # Add bucket policy for TLS-only access
+
     local bucket_policy='{
         "Version": "2012-10-17",
         "Statement": [
@@ -185,19 +185,23 @@ create_s3_bucket() {
             }
         ]
     }'
-    
+
     run_command "aws s3api put-bucket-policy --bucket '$STATE_BUCKET' --policy '$bucket_policy'" \
                "Adding TLS-only policy to S3 bucket"
 }
 
 create_oidc_provider() {
     log_info "Creating GitHub OIDC provider..."
-    
-    # GitHub Actions OIDC provider thumbprint (as of 2024)
+
     THUMBPRINT="6938fd4d98bab03faadb97b34396831e3780aea1"
-    
-    run_command "aws iam create-open-id-connect-provider --url '$OIDC_PROVIDER_URL' --client-id-list sts.amazonaws.com --thumbprint-list '$THUMBPRINT' --tags 'Key=ManagedBy,Value=AWSBootstrap' 'Key=Purpose,Value=GitHubActions'" \
-               "Creating GitHub OIDC provider"
+    OIDC_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com"
+
+    if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_ARN" 2>/dev/null; then
+        log_warning "GitHub OIDC provider already exists, skipping creation"
+    else
+        run_command "aws iam create-open-id-connect-provider --url '$OIDC_PROVIDER_URL' --client-id-list sts.amazonaws.com --thumbprint-list '$THUMBPRINT' --tags 'Key=ManagedBy,Value=AWSBootstrap' 'Key=Purpose,Value=GitHubActions'" \
+                   "Creating GitHub OIDC provider"
+    fi
 }
 
 create_iam_role() {
@@ -225,9 +229,13 @@ create_iam_role() {
         ]
     }'
     
-    run_command "aws iam create-role --role-name '$ROLE_NAME' --assume-role-policy-document '$trust_policy' --tags 'Key=ManagedBy,Value=AWSBootstrap' 'Key=Purpose,Value=GitHubActions'" \
-               "Creating IAM role: $ROLE_NAME"
-    
+    if aws iam get-role --role-name "$ROLE_NAME" 2>/dev/null; then
+        log_warning "IAM role $ROLE_NAME already exists, skipping creation"
+    else
+        run_command "aws iam create-role --role-name '$ROLE_NAME' --assume-role-policy-document '$trust_policy' --tags 'Key=ManagedBy,Value=AWSBootstrap' 'Key=Purpose,Value=GitHubActions'" \
+                   "Creating IAM role: $ROLE_NAME"
+    fi
+
     # Create permissions policy
     local permissions_policy='{
         "Version": "2012-10-17",
@@ -276,10 +284,14 @@ create_iam_role() {
         ]
     }'
     
-    run_command "aws iam create-policy --policy-name '$POLICY_NAME' --policy-document '$permissions_policy' --tags 'Key=ManagedBy,Value=AWSBootstrap' 'Key=Purpose,Value=GitHubActions'" \
-               "Creating IAM policy: $POLICY_NAME"
-    
-    # Attach policy to role
+    if aws iam get-policy --policy-arn "arn:aws:iam::${ACCOUNT_ID}:policy/${POLICY_NAME}" 2>/dev/null; then
+        log_warning "IAM policy $POLICY_NAME already exists, skipping creation"
+    else
+        run_command "aws iam create-policy --policy-name '$POLICY_NAME' --policy-document '$permissions_policy' --tags 'Key=ManagedBy,Value=AWSBootstrap' 'Key=Purpose,Value=GitHubActions'" \
+                   "Creating IAM policy: $POLICY_NAME"
+    fi
+
+    # attach-role-policy is idempotent - safe to run every time
     run_command "aws iam attach-role-policy --role-name '$ROLE_NAME' --policy-arn 'arn:aws:iam::$ACCOUNT_ID:policy/$POLICY_NAME'" \
                "Attaching policy to role"
 }
