@@ -1,266 +1,92 @@
 # AWS Bootstrap Configuration
 
-🚀 **Simple Docker-based AWS infrastructure bootstrap for GitHub Actions OIDC**
-
-This project creates the essential AWS resources needed for secure GitHub Actions authentication and Terraform remote state management. Perfect for teams and individuals who want to bootstrap their AWS infrastructure setup quickly and securely.
+Docker-based bootstrap to create the foundational AWS infrastructure needed for secure GitHub Actions deployments.
 
 ## What This Creates
 
-✅ **S3 Bucket** - Encrypted Terraform state storage with versioning and TLS-only access  
-✅ **IAM OIDC Provider** - GitHub Actions authentication without long-lived credentials  
-✅ **IAM Role** - Secure role with least-privilege permissions for deployments  
-✅ **Security Policies** - Proper access controls, encryption, and security best practices  
+- **S3 Bucket** - Encrypted Terraform state storage with versioning and TLS-only access
+- **IAM OIDC Provider** - Allows GitHub Actions to authenticate with AWS without storing credentials
+- **IAM Role** - Assumed by your other repositories to deploy resources to AWS
 
-## Why This Approach?
-
-### ✅ **Simple & Fast**
-- Pure AWS CLI - no state management complexity
-- Single command execution
-- Docker-based - works consistently everywhere
-
-### ✅ **Secure by Design**
-- No long-lived AWS credentials in GitHub
-- OIDC-based authentication
-- Least-privilege permissions
-- TLS-enforced S3 access
-
-### ✅ **Team-Ready**
-- Public repository - easy for teams to use
-- Auto-detects GitHub organization
-- Consistent across environments
-- Easy to debug and modify
-
-## Quick Start
-
-### 1. Prerequisites
+## Prerequisites
 
 - Docker installed
-- AWS credentials (temporary - only for bootstrap)
-- Make (usually pre-installed)
+- An IAM user with access and secret key (only needed for the initial bootstrap)
+- GitHub repository secrets configured:
+  - `AWS_ACCESS_KEY_ID`
+  - `AWS_SECRET_ACCESS_KEY`
+  - `AWS_REGION`
 
-### 2. Clone and Setup
+## Running via GitHub Actions
 
-```bash
-# Clone this repository
-git clone https://github.com/your-org/aws-initial-configuration.git
-cd aws-initial-configuration
+Trigger the workflow manually from the Actions tab in GitHub. It will create all resources and print the outputs.
 
-# Copy and edit environment file
-cp .env.example .env
-# Edit .env with your AWS credentials
-```
-
-### 3. Configure Environment
-
-Edit `.env` file:
-```bash
-AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-AWS_REGION=us-east-1
-```
-
-### 4. Bootstrap Your Infrastructure
+## Running Locally
 
 ```bash
-# Load environment variables
+# With Make
+cp .env.example .env   # fill in your credentials
 source .env
-
-# Run complete bootstrap
 make bootstrap
 
-# Or step by step:
-make check      # Validate credentials
-make plan       # See what will be created (dry-run)
-make bootstrap  # Create infrastructure
+# Without Make (Docker only)
+docker build -t aws-bootstrap .
+docker run --rm \
+  -e AWS_ACCESS_KEY_ID=your-key \
+  -e AWS_SECRET_ACCESS_KEY=your-secret \
+  -e AWS_REGION=us-east-1 \
+  -e GITHUB_ORG=your-github-username \
+  aws-bootstrap \
+  ./bootstrap.sh
 ```
 
-## Available Commands
+## Using the Role in Other Repositories
 
-```bash
-make help       # Show all available commands
-make check      # Validate AWS credentials and configuration
-make plan       # Show what resources will be created (dry-run)
-make bootstrap  # Create all AWS resources
-make test       # Test AWS connectivity
-make destroy    # Remove all AWS resources (careful!)
-make clean      # Clean up Docker resources
-```
-
-## Example Output
-
-After successful bootstrap:
-
-```
-🎉 Bootstrap completed successfully!
-
-📝 Save these values for your other repositories:
-
-github_actions_role_arn = "arn:aws:iam::123456789012:role/github-actions-terraform"
-github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
-state_bucket_name = "tf-state-123456789012-us-east-1"
-```
-
-## Using the Bootstrap in Your Projects
-
-### GitHub Actions Workflow
-
-Add this to your repository's `.github/workflows/deploy.yml`:
+After bootstrap, add this to any workflow in your GitHub repositories:
 
 ```yaml
-name: Deploy to AWS
+permissions:
+  id-token: write
+  contents: read
 
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # Required for OIDC
-      contents: read
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::123456789012:role/github-actions-terraform
-          aws-region: us-east-1
-          
-      - name: Deploy with Terraform
-        run: |
-          terraform init
-          terraform plan
-          terraform apply -auto-approve
+steps:
+  - name: Configure AWS Credentials
+    uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: arn:aws:iam::YOUR_ACCOUNT_ID:role/github-actions-terraform
+      aws-region: us-east-1
 ```
 
-### Terraform Backend Configuration
-
-Add this to your Terraform configuration:
+And this backend configuration in Terraform:
 
 ```hcl
 terraform {
   backend "s3" {
-    bucket       = "tf-state-123456789012-us-east-1"
+    bucket       = "tf-state-YOUR_ACCOUNT_ID-us-east-1"
     key          = "my-project/terraform.tfstate"
     region       = "us-east-1"
-    use_lockfile = true  # Native S3 locking, requires Terraform 1.10+
+    use_lockfile = true
     encrypt      = true
   }
 }
 ```
 
-## Advanced Usage
-
-### Custom GitHub Organization
-
-```bash
-GITHUB_ORG=my-custom-org make bootstrap
-```
-
-### Different AWS Region
-
-```bash
-AWS_REGION=eu-west-1 make bootstrap
-```
-
-### Dry Run (See What Would Be Created)
-
-```bash
-make plan
-```
-
-### Testing Credentials
-
-```bash
-make test
-```
-
-## Troubleshooting
-
-### Docker Issues
-
-```bash
-# macOS/Linux: Add user to docker group
-sudo usermod -aG docker $USER
-# Then logout and login again
-
-# Or use sudo
-sudo make bootstrap
-```
-
-### AWS Credentials Issues
-
-```bash
-# Test your credentials
-aws sts get-caller-identity
-
-# Common issues:
-# 1. Wrong region in .env file
-# 2. Expired or invalid credentials
-# 3. Insufficient permissions (need IAM, S3, STS access)
-```
-
-### Permission Errors
-
-The bootstrap user needs these minimum permissions:
-- `iam:CreateRole`, `iam:CreatePolicy`, `iam:AttachRolePolicy`
-- `iam:CreateOpenIDConnectProvider`
-- `s3:CreateBucket`, `s3:PutBucketPolicy`, `s3:PutBucketEncryption`
-- `sts:GetCallerIdentity`
-
 ## Security Notes
 
-### ⚠️ Important Security Practices
+- Delete the IAM user access keys after the bootstrap completes - they are no longer needed
+- Never commit the `.env` file - it contains your AWS credentials
+- All future deployments use OIDC, so no AWS credentials need to be stored in GitHub
 
-1. **Rotate Bootstrap Credentials** - Delete the IAM user after bootstrap
-2. **Never Commit .env** - Contains your AWS credentials
-3. **Use Least Privilege** - Create dedicated bootstrap user
-4. **Monitor Usage** - Check AWS CloudTrail logs
-
-### ✅ After Bootstrap
-
-1. **Delete IAM Access Keys** - No longer needed
-2. **Use OIDC Roles** - For all future deployments
-3. **Rotate Regularly** - Follow AWS security best practices
-
-## Project Structure
-
-```
-├── bootstrap.sh       # Main bootstrap script (AWS CLI commands)
-├── Dockerfile         # Container with AWS CLI and tools
-├── Makefile          # User-friendly commands
-├── .env.example      # Environment template
-├── README.md         # This documentation
-└── .github/workflows/ # Simple validation workflow
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Test your changes
-4. Submit a pull request
-
-## Support
-
-- 🐛 **Issues**: [GitHub Issues](https://github.com/your-org/aws-initial-configuration/issues)
-- 📚 **Documentation**: This README
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/your-org/aws-initial-configuration/discussions)
-
-## License
-
-MIT License - see LICENSE file for details.
-
----
-
-**Ready to bootstrap your AWS infrastructure?** 🚀
+## Available Make Commands
 
 ```bash
-make bootstrap
+make check      # Validate AWS credentials
+make plan       # Dry-run, shows what will be created
+make bootstrap  # Create all AWS resources
+make destroy    # Delete all AWS resources
+make test       # Test AWS connectivity
 ```
 
-*No Terraform state management. No complex workflows. Just simple, secure AWS bootstrap in minutes.*
+
+
+
